@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -179,15 +180,29 @@ func (c *Certifier) Obtain(request ObtainRequest) (*Resource, error) {
 	if err != nil {
 		return nil, err
 	}
+	log.Infof("[%s] acme: OrderURL", strings.Join(domains, ", "), order.Location)
 
-	authz, err := c.getAuthorizations(order)
+	orderJSON, err := json.MarshalIndent(order, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	log.Infof("[%s] acme: Order %s", strings.Join(domains, ", "), string(orderJSON))
+
+	authzs, err := c.getAuthorizations(order)
 	if err != nil {
 		// If any challenge fails, return. Do not generate partial SAN certificates.
 		c.deactivateAuthorizations(order, request.AlwaysDeactivateAuthorizations)
 		return nil, err
 	}
+	for _, authz := range authzs {
+		authzJSON, err := json.MarshalIndent(authz, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		log.Infof("[%s] acme: Pending Authz %s", strings.Join(domains, ", "), string(authzJSON))
+	}
 
-	err = c.resolver.Solve(authz)
+	err = c.resolver.Solve(authzs)
 	if err != nil {
 		// If any challenge fails, return. Do not generate partial SAN certificates.
 		c.deactivateAuthorizations(order, request.AlwaysDeactivateAuthorizations)
@@ -199,13 +214,25 @@ func (c *Certifier) Obtain(request ObtainRequest) (*Resource, error) {
 	failures := newObtainError()
 	cert, err := c.getForOrder(domains, order, request)
 	if err != nil {
-		for _, auth := range authz {
+		for _, auth := range authzs {
 			failures.Add(challenge.GetTargetedDomain(auth), err)
 		}
 	}
 
 	if request.AlwaysDeactivateAuthorizations {
 		c.deactivateAuthorizations(order, true)
+	}
+
+	authzs, err = c.getAuthorizations(order)
+	if err != nil {
+		return nil, err
+	}
+	for _, authz := range authzs {
+		authzJSON, err := json.MarshalIndent(authz, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		log.Infof("[%s] acme: Final Authz %s", strings.Join(domains, ", "), string(authzJSON))
 	}
 
 	return cert, failures.Join()
@@ -247,14 +274,14 @@ func (c *Certifier) ObtainForCSR(request ObtainForCSRRequest) (*Resource, error)
 		return nil, err
 	}
 
-	authz, err := c.getAuthorizations(order)
+	authzs, err := c.getAuthorizations(order)
 	if err != nil {
 		// If any challenge fails, return. Do not generate partial SAN certificates.
 		c.deactivateAuthorizations(order, request.AlwaysDeactivateAuthorizations)
 		return nil, err
 	}
 
-	err = c.resolver.Solve(authz)
+	err = c.resolver.Solve(authzs)
 	if err != nil {
 		// If any challenge fails, return. Do not generate partial SAN certificates.
 		c.deactivateAuthorizations(order, request.AlwaysDeactivateAuthorizations)
@@ -272,7 +299,7 @@ func (c *Certifier) ObtainForCSR(request ObtainForCSRRequest) (*Resource, error)
 
 	cert, err := c.getForCSR(domains, order, request.Bundle, request.CSR.Raw, privateKey, request.PreferredChain)
 	if err != nil {
-		for _, auth := range authz {
+		for _, auth := range authzs {
 			failures.Add(challenge.GetTargetedDomain(auth), err)
 		}
 	}
